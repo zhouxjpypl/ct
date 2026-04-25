@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <time.h>
+#include <setjmp.h>
 
 #define VERSION "1.0.0"
 #define MAX_VARS 10000
@@ -41,20 +42,18 @@ typedef struct Value {
     };
 } Value;
 
-/* 变量 */
 typedef struct Var {
     char name[256];
     Value value;
     struct Var *next;
 } Var;
 
-/* 执行环境 */
 typedef struct Env {
     Var *vars;
     struct Env *parent;
+    jmp_buf *breaker;
 } Env;
 
-/* 全局状态 */
 static Env *global_env;
 static int call_depth = 0;
 
@@ -83,6 +82,92 @@ char* safe_strdup(const char *s) {
     char *dup = strdup(s);
     if (!dup) error("Out of memory");
     return dup;
+}
+
+/* 字符串辅助函数 */
+int str_len(const char *s) {
+    return strlen(s);
+}
+
+char* str_sub(const char *s, int start, int end) {
+    int len = strlen(s);
+    if (start < 0) start = 0;
+    if (end > len) end = len;
+    if (start >= end) return safe_strdup("");
+
+    char *result = safe_malloc(end - start + 1);
+    strncpy(result, s + start, end - start);
+    result[end - start] = '\0';
+    return result;
+}
+
+char* str_replace(const char *s, const char *old, const char *new_str) {
+    char *result = safe_malloc(MAX_STR_LEN);
+    const char *p = s;
+    char *r = result;
+    int old_len = strlen(old);
+    int new_len = strlen(new_str);
+
+    while (*p) {
+        if (strncmp(p, old, old_len) == 0) {
+            strcpy(r, new_str);
+            r += new_len;
+            p += old_len;
+        } else {
+            *r++ = *p++;
+        }
+    }
+    *r = '\0';
+    return result;
+}
+
+char* str_toupper(const char *s) {
+    char *result = safe_strdup(s);
+    for (int i = 0; result[i]; i++) {
+        result[i] = toupper(result[i]);
+    }
+    return result;
+}
+
+char* str_tolower(const char *s) {
+    char *result = safe_strdup(s);
+    for (int i = 0; result[i]; i++) {
+        result[i] = tolower(result[i]);
+    }
+    return result;
+}
+
+/* 文件操作 */
+char* file_read(const char *filename) {
+    FILE *f = fopen(filename, "r");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char *content = safe_malloc(size + 1);
+    fread(content, 1, size, f);
+    content[size] = '\0';
+    fclose(f);
+
+    return content;
+}
+
+int file_write(const char *filename, const char *content) {
+    FILE *f = fopen(filename, "w");
+    if (!f) return -1;
+    fprintf(f, "%s", content);
+    fclose(f);
+    return 1;
+}
+
+int file_append(const char *filename, const char *content) {
+    FILE *f = fopen(filename, "a");
+    if (!f) return -1;
+    fprintf(f, "%s", content);
+    fclose(f);
+    return 1;
 }
 
 /* 值操作 */
@@ -154,11 +239,10 @@ void print_value(Value *v) {
             }
             printf("]");
             break;
-        case TYPE_FUNCTION:
-            printf("<function>");
-            break;
         case TYPE_NULL:
             printf("null");
+            break;
+        default:
             break;
     }
 }
@@ -168,6 +252,7 @@ Env* create_env(Env *parent) {
     Env *env = safe_malloc(sizeof(Env));
     env->vars = NULL;
     env->parent = parent;
+    env->breaker = NULL;
     return env;
 }
 
@@ -238,8 +323,6 @@ static char* parse_string(const char **p) {
             switch (**p) {
                 case 'n': str[i++] = '\n'; break;
                 case 't': str[i++] = '\t'; break;
-                case '\\': str[i++] = '\\'; break;
-                case '"': str[i++] = '"'; break;
                 default: str[i++] = **p; break;
             }
         } else {
@@ -297,6 +380,38 @@ static Value eval_primary(const char **p, Env *env) {
         if (**p == ']') (*p)++;
         return arr;
     }
+    else if (strncmp(*p, "len", 3) == 0 && !isalnum((*p)[3])) {
+        *p += 3;
+        if (**p == '(') (*p)++;
+        Value arg = eval_expr(p, env);
+        if (**p == ')') (*p)++;
+
+        int len = 0;
+        if (arg.type == TYPE_STRING) {
+            len = strlen(arg.str);
+        } else if (arg.type == TYPE_ARRAY) {
+            len = arg.arr.length;
+        }
+        free_value(&arg);
+        return make_number(len);
+    }
+    else if (strncmp(*p, "read", 4) == 0 && !isalnum((*p)[4])) {
+        *p += 4;
+        if (**p == '(') (*p)++;
+        Value filename = eval_expr(p, env);
+        if (**p == ')') (*p)++;
+
+        char *content = file_read(filename.str);
+        Value result;
+        if (content) {
+            result = make_string(content);
+            free(content);
+        } else {
+            result = make_null();
+        }
+        free_value(&filename);
+        return result;
+    }
     else if (isalpha(**p) || **p == '_') {
         char *name = parse_ident(p);
 
@@ -339,32 +454,12 @@ static Value eval_primary(const char **p, Env *env) {
             free(name);
             return make_null();
         }
-        else if (**p == '[') {
+        else if (**p == '=') {
             (*p)++;
-            Value index = eval_expr(p, env);
-            if (**p == ']') (*p)++;
-
-            Value *arr = env_get(env, name);
-            if (!arr || arr->type != TYPE_ARRAY) {
-                error("Not an array: %s", name);
-            }
-
-            int idx = (int)index.num;
-            if (idx < 0 || idx >= arr->arr.length) {
-                error("Array index out of bounds");
-            }
-
-            if (**p == '=') {
-                (*p)++;
-                Value val = eval_expr(p, env);
-                free_value(&arr->arr.items[idx]);
-                arr->arr.items[idx] = val;
-                free(name);
-                return make_null();
-            } else {
-                free(name);
-                return arr->arr.items[idx];
-            }
+            Value v = eval_expr(p, env);
+            env_set(env, name, v);
+            free(name);
+            return make_null();
         }
         else {
             Value *v = env_get(env, name);
@@ -377,59 +472,28 @@ static Value eval_primary(const char **p, Env *env) {
     return make_null();
 }
 
-static Value eval_power(const char **p, Env *env) {
-    Value left = eval_primary(p, env);
-
-    while (isspace(**p)) (*p)++;
-    if (**p == '^') {
-        (*p)++;
-        Value right = eval_power(p, env);
-        if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
-            return make_number(pow(left.num, right.num));
-        }
-    }
-    return left;
-}
-
-static Value eval_unary(const char **p, Env *env) {
-    while (isspace(**p)) (*p)++;
-
-    if (**p == '-' || **p == '+') {
-        char op = **p;
-        (*p)++;
-        Value v = eval_unary(p, env);
-        if (v.type == TYPE_NUMBER) {
-            return make_number(op == '-' ? -v.num : v.num);
-        }
-    }
-    else if (**p == '!') {
-        (*p)++;
-        Value v = eval_unary(p, env);
-        return make_number(v.type == TYPE_NULL ||
-                           (v.type == TYPE_NUMBER && v.num == 0) ? 1 : 0);
-    }
-
-    return eval_power(p, env);
-}
-
 static Value eval_mul_div(const char **p, Env *env) {
-    Value left = eval_unary(p, env);
+    Value left = eval_primary(p, env);
 
     while (isspace(**p)) (*p)++;
     while (**p == '*' || **p == '/') {
         char op = **p;
         (*p)++;
-        Value right = eval_unary(p, env);
+        Value right = eval_primary(p, env);
 
-        if (left.type != TYPE_NUMBER || right.type != TYPE_NUMBER) {
-            error("Arithmetic on non-numbers");
-        }
-
-        if (op == '*') {
-            left.num = left.num * right.num;
-        } else {
-            if (right.num == 0) error("Division by zero");
-            left.num = left.num / right.num;
+        if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
+            if (op == '*') left.num = left.num * right.num;
+            else left.num = left.num / right.num;
+        } else if (left.type == TYPE_STRING && op == '*') {
+            int repeat = (int)right.num;
+            char *new_str = safe_malloc(strlen(left.str) * repeat + 1);
+            new_str[0] = '\0';
+            for (int i = 0; i < repeat; i++) {
+                strcat(new_str, left.str);
+            }
+            free_value(&left);
+            left = make_string(new_str);
+            free(new_str);
         }
 
         while (isspace(**p)) (*p)++;
@@ -446,22 +510,17 @@ static Value eval_add_sub(const char **p, Env *env) {
         (*p)++;
         Value right = eval_mul_div(p, env);
 
-        if (left.type == TYPE_STRING || right.type == TYPE_STRING) {
-            if (op == '+') {
-                char *str1 = left.type == TYPE_STRING ? left.str : "";
-                char *str2 = right.type == TYPE_STRING ? right.str : "";
-                char *result = safe_malloc(strlen(str1) + strlen(str2) + 1);
-                sprintf(result, "%s%s", str1, str2);
-                left = make_string(result);
-                free(result);
-            } else {
-                error("Cannot subtract from string");
-            }
-        } else if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
+        if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
             if (op == '+') left.num = left.num + right.num;
             else left.num = left.num - right.num;
-        } else {
-            error("Invalid operands for + or -");
+        }
+        else if (left.type == TYPE_STRING && op == '+') {
+            char *new_str = safe_malloc(strlen(left.str) + strlen(right.str) + 1);
+            strcpy(new_str, left.str);
+            strcat(new_str, right.str);
+            free_value(&left);
+            left = make_string(new_str);
+            free(new_str);
         }
 
         while (isspace(**p)) (*p)++;
@@ -473,55 +532,63 @@ static Value eval_comparison(const char **p, Env *env) {
     Value left = eval_add_sub(p, env);
 
     while (isspace(**p)) (*p)++;
-    if (**p == '=' && (*p)[1] == '=') {
+    if (strncmp(*p, "==", 2) == 0) {
         *p += 2;
         Value right = eval_comparison(p, env);
-        int equal = 0;
+        int result = 0;
         if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
-            equal = (left.num == right.num);
+            result = (left.num == right.num);
         } else if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
-            equal = (strcmp(left.str, right.str) == 0);
+            result = (strcmp(left.str, right.str) == 0);
         }
-        return make_number(equal ? 1 : 0);
+        free_value(&left);
+        free_value(&right);
+        return make_number(result);
     }
-    else if (**p == '!' && (*p)[1] == '=') {
+    else if (strncmp(*p, "!=", 2) == 0) {
         *p += 2;
         Value right = eval_comparison(p, env);
-        int not_equal = 1;
+        int result = 0;
         if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
-            not_equal = (left.num != right.num);
+            result = (left.num != right.num);
         }
-        return make_number(not_equal ? 1 : 0);
+        free_value(&left);
+        free_value(&right);
+        return make_number(result);
     }
     else if (**p == '<') {
         (*p)++;
-        int less = 0;
-        if ((*p)[0] == '=') {
+        int is_le = 0;
+        if (**p == '=') {
             (*p)++;
-            Value right = eval_comparison(p, env);
-            if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER)
-                less = (left.num <= right.num);
-        } else {
-            Value right = eval_comparison(p, env);
-            if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER)
-                less = (left.num < right.num);
+            is_le = 1;
         }
-        return make_number(less ? 1 : 0);
+        Value right = eval_comparison(p, env);
+        int result = 0;
+        if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
+            if (is_le) result = (left.num <= right.num);
+            else result = (left.num < right.num);
+        }
+        free_value(&left);
+        free_value(&right);
+        return make_number(result);
     }
     else if (**p == '>') {
         (*p)++;
-        int greater = 0;
-        if ((*p)[0] == '=') {
+        int is_ge = 0;
+        if (**p == '=') {
             (*p)++;
-            Value right = eval_comparison(p, env);
-            if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER)
-                greater = (left.num >= right.num);
-        } else {
-            Value right = eval_comparison(p, env);
-            if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER)
-                greater = (left.num > right.num);
+            is_ge = 1;
         }
-        return make_number(greater ? 1 : 0);
+        Value right = eval_comparison(p, env);
+        int result = 0;
+        if (left.type == TYPE_NUMBER && right.type == TYPE_NUMBER) {
+            if (is_ge) result = (left.num >= right.num);
+            else result = (left.num > right.num);
+        }
+        free_value(&left);
+        free_value(&right);
+        return make_number(result);
     }
 
     return left;
@@ -534,10 +601,10 @@ static Value eval_and(const char **p, Env *env) {
     if (strncmp(*p, "and", 3) == 0 && !isalnum((*p)[3])) {
         *p += 3;
         Value right = eval_and(p, env);
-        int left_true = (left.type == TYPE_NUMBER && left.num != 0) ||
-                        (left.type == TYPE_STRING && left.str && left.str[0]);
-        int right_true = (right.type == TYPE_NUMBER && right.num != 0) ||
-                         (right.type == TYPE_STRING && right.str && right.str[0]);
+        int left_true = (left.type == TYPE_NUMBER && left.num != 0);
+        int right_true = (right.type == TYPE_NUMBER && right.num != 0);
+        free_value(&left);
+        free_value(&right);
         return make_number((left_true && right_true) ? 1 : 0);
     }
     return left;
@@ -550,10 +617,10 @@ static Value eval_or(const char **p, Env *env) {
     if (strncmp(*p, "or", 2) == 0 && !isalnum((*p)[2])) {
         *p += 2;
         Value right = eval_or(p, env);
-        int left_true = (left.type == TYPE_NUMBER && left.num != 0) ||
-                        (left.type == TYPE_STRING && left.str && left.str[0]);
-        int right_true = (right.type == TYPE_NUMBER && right.num != 0) ||
-                         (right.type == TYPE_STRING && right.str && right.str[0]);
+        int left_true = (left.type == TYPE_NUMBER && left.num != 0);
+        int right_true = (right.type == TYPE_NUMBER && right.num != 0);
+        free_value(&left);
+        free_value(&right);
         return make_number((left_true || right_true) ? 1 : 0);
     }
     return left;
@@ -563,29 +630,201 @@ Value eval_expr(const char **p, Env *env) {
     return eval_or(p, env);
 }
 
-/* 语句解析 */
-void eval_statement(const char **p, Env *env) {
-    while (isspace(**p)) (*p)++;
-    if (!**p) return;
-
-    if (strncmp(*p, "print", 5) == 0 && !isalnum((*p)[5])) {
-        *p += 5;
-        while (isspace(**p)) (*p)++;
-
-        Value v = eval_expr(p, env);
-        print_value(&v);
-        printf("\n");
-        free_value(&v);
+/* 字符串方法调用 */
+static Value call_string_method(const char *method, Value *self, const char **p, Env *env) {
+    if (strcmp(method, "len") == 0) {
+        return make_number(strlen(self->str));
     }
-    else if (strncmp(*p, "if", 2) == 0 && !isalnum((*p)[2])) {
+    else if (strcmp(method, "upper") == 0) {
+        char *result = str_toupper(self->str);
+        Value v = make_string(result);
+        free(result);
+        return v;
+    }
+    else if (strcmp(method, "lower") == 0) {
+        char *result = str_tolower(self->str);
+        Value v = make_string(result);
+        free(result);
+        return v;
+    }
+    else if (strcmp(method, "sub") == 0) {
+        if (**p == '(') (*p)++;
+        Value start = eval_expr(p, env);
+        if (**p == ',') (*p)++;
+        Value end = eval_expr(p, env);
+        if (**p == ')') (*p)++;
+
+        char *result = str_sub(self->str, (int)start.num, (int)end.num);
+        Value v = make_string(result);
+        free(result);
+        free_value(&start);
+        free_value(&end);
+        return v;
+    }
+    else if (strcmp(method, "replace") == 0) {
+        if (**p == '(') (*p)++;
+        Value old_str = eval_expr(p, env);
+        if (**p == ',') (*p)++;
+        Value new_str = eval_expr(p, env);
+        if (**p == ')') (*p)++;
+
+        char *result = str_replace(self->str, old_str.str, new_str.str);
+        Value v = make_string(result);
+        free(result);
+        free_value(&old_str);
+        free_value(&new_str);
+        return v;
+    }
+
+    error("Unknown string method: %s", method);
+    return make_null();
+}
+
+/* 语句解析 */
+static void parse_block(const char **p, Env *env) {
+    if (**p == '{') {
+        (*p)++;
+        while (**p && **p != '}') {
+            eval_statement(p, env);
+            while (isspace(**p)) (*p)++;
+        }
+        if (**p == '}') (*p)++;
+    } else {
+        eval_statement(p, env);
+    }
+}
+
+static void parse_for_loop(const char **p, Env *env) {
+    // for i = 1 to 10 { ... }
+    // for i = 10 downto 1 { ... }
+
+    while (isspace(**p)) (*p)++;
+    char *var_name = parse_ident(p);
+
+    while (isspace(**p)) (*p)++;
+    if (**p != '=') error("Expected '=' in for loop");
+    (*p)++;
+
+    Value start_val = eval_expr(p, env);
+
+    while (isspace(**p)) (*p)++;
+    int is_downto = 0;
+    if (strncmp(*p, "to", 2) == 0) {
         *p += 2;
-        Value cond = eval_expr(p, env);
-        int true_branch = (cond.type == TYPE_NUMBER && cond.num != 0);
+    } else if (strncmp(*p, "downto", 6) == 0) {
+        *p += 6;
+        is_downto = 1;
+    } else {
+        error("Expected 'to' or 'downto' in for loop");
+    }
+
+    while (isspace(**p)) (*p)++;
+    Value end_val = eval_expr(p, env);
+
+    while (isspace(**p)) (*p)++;
+    parse_block(p, env);
+
+    double start = start_val.num;
+    double end = end_val.num;
+
+    if (is_downto) {
+        for (double i = start; i >= end; i = i - 1) {
+            env_set(env, var_name, make_number(i));
+            const char *save = *p;
+            parse_block(&save, env);
+        }
+    } else {
+        for (double i = start; i <= end; i = i + 1) {
+            env_set(env, var_name, make_number(i));
+            const char *save = *p;
+            parse_block(&save, env);
+        }
+    }
+
+    free_value(&start_val);
+    free_value(&end_val);
+    free(var_name);
+}
+
+static void parse_while(const char **p, Env *env) {
+    const char *cond_start = *p;
+    Value cond = eval_expr(&cond_start, env);
+
+    while (cond.type == TYPE_NUMBER && cond.num != 0) {
+        const char *body_ptr = cond_start;
+        while (isspace(*body_ptr)) body_ptr++;
+        Env *loop_env = create_env(env);
+
+        if (*body_ptr == '{') {
+            body_ptr++;
+            while (*body_ptr && *body_ptr != '}') {
+                eval_statement(&body_ptr, loop_env);
+                while (isspace(*body_ptr)) body_ptr++;
+            }
+        } else {
+            eval_statement(&body_ptr, loop_env);
+        }
+
+        destroy_env(loop_env);
+
+        const char *new_cond = cond_start;
         free_value(&cond);
+        cond = eval_expr(&new_cond, env);
+    }
 
+    free_value(&cond);
+
+    // 跳过循环体
+    int brace = 0;
+    while (**p) {
+        if (**p == '{') brace++;
+        if (**p == '}') {
+            if (brace == 0) break;
+            brace--;
+        }
+        (*p)++;
+    }
+    if (**p == '}') (*p)++;
+}
+
+static void parse_if(const char **p, Env *env) {
+    Value cond = eval_expr(p, env);
+    int truth = (cond.type == TYPE_NUMBER && cond.num != 0);
+    free_value(&cond);
+
+    while (isspace(**p)) (*p)++;
+
+    if (truth) {
+        if (**p == '{') {
+            (*p)++;
+            while (**p && **p != '}') {
+                eval_statement(p, env);
+                while (isspace(**p)) (*p)++;
+            }
+            if (**p == '}') (*p)++;
+        } else {
+            eval_statement(p, env);
+        }
+    } else {
+        // 跳过 if 块
+        if (**p == '{') {
+            int brace = 1;
+            (*p)++;
+            while (brace > 0 && **p) {
+                if (**p == '{') brace++;
+                if (**p == '}') brace--;
+                (*p)++;
+            }
+        } else {
+            while (**p && **p != ';' && **p != '\n') (*p)++;
+        }
+
+        // 检查 else
         while (isspace(**p)) (*p)++;
+        if (strncmp(*p, "else", 4) == 0 && !isalnum((*p)[4])) {
+            *p += 4;
+            while (isspace(**p)) (*p)++;
 
-        if (true_branch) {
             if (**p == '{') {
                 (*p)++;
                 while (**p && **p != '}') {
@@ -596,193 +835,121 @@ void eval_statement(const char **p, Env *env) {
             } else {
                 eval_statement(p, env);
             }
-        } else {
-            int brace = 0;
-            if (**p == '{') {
-                brace = 1;
-                (*p)++;
-                while (brace > 0 && **p) {
-                    if (**p == '{') brace++;
-                    if (**p == '}') brace--;
-                    (*p)++;
-                }
-            } else {
-                while (**p && **p != ';') (*p)++;
-            }
         }
+    }
+}
 
-        while (isspace(**p)) (*p)++;
-        if (strncmp(*p, "else", 4) == 0 && !isalnum((*p)[4])) {
-            *p += 4;
+static void parse_function(const char **p, Env *env) {
+    while (isspace(**p)) (*p)++;
+    char *name = parse_ident(p);
+    while (isspace(**p)) (*p)++;
+
+    Value func_val;
+    func_val.type = TYPE_FUNCTION;
+    func_val.func.param_names = NULL;
+    func_val.func.param_count = 0;
+    func_val.func.body = NULL;
+    func_val.func.closure = create_env(global_env);
+
+    if (**p == '(') {
+        (*p)++;
+        while (**p && **p != ')') {
+            char *param = parse_ident(p);
+            func_val.func.param_names = realloc(func_val.func.param_names,
+                                                sizeof(char*) * (func_val.func.param_count + 1));
+            func_val.func.param_names[func_val.func.param_count++] = param;
+            if (**p == ',') (*p)++;
             while (isspace(**p)) (*p)++;
-
-            if (!true_branch) {
-                if (**p == '{') {
-                    (*p)++;
-                    while (**p && **p != '}') {
-                        eval_statement(p, env);
-                        while (isspace(**p)) (*p)++;
-                    }
-                    if (**p == '}') (*p)++;
-                } else {
-                    eval_statement(p, env);
-                }
-            } else {
-                if (**p == '{') {
-                    int brace = 1;
-                    (*p)++;
-                    while (brace > 0 && **p) {
-                        if (**p == '{') brace++;
-                        if (**p == '}') brace--;
-                        (*p)++;
-                    }
-                } else {
-                    while (**p && **p != ';') (*p)++;
-                }
-            }
         }
+        if (**p == ')') (*p)++;
+    }
+
+    while (isspace(**p)) (*p)++;
+    if (**p == '{') {
+        const char *start = *p;
+        int brace = 1;
+        (*p)++;
+        while (brace > 0 && **p) {
+            if (**p == '{') brace++;
+            if (**p == '}') brace--;
+            (*p)++;
+        }
+        int len = *p - start;
+        func_val.func.body = safe_malloc(len + 1);
+        strncpy(func_val.func.body, start, len);
+        func_val.func.body[len] = '\0';
+    }
+
+    env_set(env, name, func_val);
+    free(name);
+}
+
+void eval_statement(const char **p, Env *env) {
+    while (isspace(**p)) (*p)++;
+    if (!**p) return;
+
+    if (strncmp(*p, "print", 5) == 0 && !isalnum((*p)[5])) {
+        *p += 5;
+        while (isspace(**p)) (*p)++;
+        Value v = eval_expr(p, env);
+        print_value(&v);
+        printf("\n");
+        free_value(&v);
+    }
+    else if (strncmp(*p, "for", 3) == 0 && !isalnum((*p)[3])) {
+        *p += 3;
+        parse_for_loop(p, env);
     }
     else if (strncmp(*p, "while", 5) == 0 && !isalnum((*p)[5])) {
         *p += 5;
-        const char *cond_start = *p;
-
-        while (1) {
-            const char *save = cond_start;
-            Value cond = eval_expr(&save, env);
-            if (cond.type != TYPE_NUMBER || cond.num == 0) {
-                free_value(&cond);
-                break;
-            }
-            free_value(&cond);
-
-            const char *body_ptr = save;
-            while (isspace(*body_ptr)) body_ptr++;
-
-            if (*body_ptr == '{') {
-                body_ptr++;
-                Env *loop_env = create_env(env);
-                while (*body_ptr && *body_ptr != '}') {
-                    eval_statement(&body_ptr, loop_env);
-                    while (isspace(*body_ptr)) body_ptr++;
-                }
-                destroy_env(loop_env);
-            } else {
-                Env *loop_env = create_env(env);
-                eval_statement(&body_ptr, loop_env);
-                destroy_env(loop_env);
-            }
-        }
-
-        int brace = 0;
-        while (**p) {
-            if (**p == '{') brace++;
-            if (**p == '}') {
-                if (brace == 0) break;
-                brace--;
-            }
-            (*p)++;
-        }
-        if (**p == '}') (*p)++;
+        parse_while(p, env);
+    }
+    else if (strncmp(*p, "if", 2) == 0 && !isalnum((*p)[2])) {
+        *p += 2;
+        parse_if(p, env);
     }
     else if (strncmp(*p, "func", 4) == 0 && !isalnum((*p)[4])) {
         *p += 4;
-        while (isspace(**p)) (*p)++;
-
-        char *name = parse_ident(p);
-        while (isspace(**p)) (*p)++;
-
-        Value func_val;
-        func_val.type = TYPE_FUNCTION;
-        func_val.func.param_names = NULL;
-        func_val.func.param_count = 0;
-        func_val.func.body = NULL;
-        func_val.func.closure = create_env(global_env);
-
-        if (**p == '(') {
-            (*p)++;
-            while (**p && **p != ')') {
-                char *param = parse_ident(p);
-                func_val.func.param_names = realloc(func_val.func.param_names,
-                                                    sizeof(char*) * (func_val.func.param_count + 1));
-                func_val.func.param_names[func_val.func.param_count++] = param;
-                if (**p == ',') (*p)++;
-                while (isspace(**p)) (*p)++;
-            }
-            if (**p == ')') (*p)++;
-        }
-
-        while (isspace(**p)) (*p)++;
-        if (**p == '{') {
-            const char *start = *p;
-            int brace = 1;
-            (*p)++;
-            while (brace > 0 && **p) {
-                if (**p == '{') brace++;
-                if (**p == '}') brace--;
-                (*p)++;
-            }
-            int len = *p - start;
-            func_val.func.body = safe_malloc(len + 1);
-            strncpy(func_val.func.body, start, len);
-            func_val.func.body[len] = '\0';
-        }
-
-        env_set(env, name, func_val);
-        free(name);
+        parse_function(p, env);
     }
     else if (strncmp(*p, "return", 6) == 0 && !isalnum((*p)[6])) {
         *p += 6;
         Value v = eval_expr(p, env);
-        longjmp(*(jmp_buf*)env->parent, 1);
+        // TODO: handle return value
         free_value(&v);
     }
-    else if (strncmp(*p, "break", 5) == 0 && !isalnum((*p)[5])) {
-        *p += 5;
-        longjmp(*(jmp_buf*)env->parent, 2);
-    }
-    else if (strncmp(*p, "continue", 8) == 0 && !isalnum((*p)[8])) {
-        *p += 8;
-        longjmp(*(jmp_buf*)env->parent, 3);
-    }
     else if (isalpha(**p) || **p == '_') {
+        // 可能是变量赋值或方法调用
         char *name = parse_ident(p);
 
-        if (**p == '=') {
+        if (**p == '.') {
             (*p)++;
-            Value v = eval_expr(p, env);
-            env_set(env, name, v);
-        } else if (**p == '[') {
-            (*p)++;
-            Value index = eval_expr(p, env);
-            if (**p == ']') (*p)++;
+            char *method = parse_ident(p);
+
+            Value *self = env_get(env, name);
+            if (!self || self->type != TYPE_STRING) {
+                error("Method call on non-string");
+            }
+
+            Value result = call_string_method(method, self, p, env);
+            print_value(&result);
+            printf("\n");
+            free_value(&result);
+            free(method);
+        } else {
+            while (isspace(**p)) (*p)++;
             if (**p == '=') {
                 (*p)++;
-                Value val = eval_expr(p, env);
-
-                Value *arr = env_get(env, name);
-                if (!arr || arr->type != TYPE_ARRAY) {
-                    error("Not an array: %s", name);
+                Value v = eval_expr(p, env);
+                env_set(env, name, v);
+            } else {
+                Value *v = env_get(env, name);
+                if (v) {
+                    print_value(v);
+                    printf("\n");
                 }
-
-                int idx = (int)index.num;
-                if (idx < 0 || idx >= arr->arr.capacity) {
-                    error("Array index out of bounds");
-                }
-
-                while (idx >= arr->arr.length) {
-                    arr->arr.items[arr->arr.length++] = make_null();
-                }
-
-                free_value(&arr->arr.items[idx]);
-                arr->arr.items[idx] = val;
             }
-        } else {
-            Value v = eval_expr(p, env);
-            print_value(&v);
-            printf("\n");
-            free_value(&v);
         }
-
         free(name);
     }
 
@@ -802,6 +969,29 @@ void eval_program(const char *code, Env *env) {
             eval_statement(&p, env);
         }
     }
+}
+
+/* 文件操作语句 */
+static void parse_write_file(const char **p, Env *env) {
+    while (isspace(**p)) (*p)++;
+    if (**p != '(') error("Expected '(' after write");
+    (*p)++;
+
+    Value filename = eval_expr(p, env);
+    if (**p != ',') error("Expected ',' after filename");
+    (*p)++;
+
+    Value content = eval_expr(p, env);
+    if (**p != ')') error("Expected ')'");
+    (*p)++;
+
+    int result = file_write(filename.str, content.str);
+    if (result == -1) {
+        error("Cannot write to file: %s", filename.str);
+    }
+
+    free_value(&filename);
+    free_value(&content);
 }
 
 /* 交互式环境 */
