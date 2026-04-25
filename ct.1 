@@ -1,0 +1,188 @@
+.\" CT Programming Language Manual
+.TH CT 1 "2024-01-01" "1.0" "CT Programming Language"
+
+.SH NAME
+ct \- CT programming language interpreter
+
+.SH SYNOPSIS
+.B ct
+[options] [file]
+
+.SH DESCRIPTION
+CT is a simple, lightweight scripting language interpreter written in C.
+It supports variables, arithmetic operations, loops, conditionals, and
+built-in mathematical functions.
+
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Display help information and exit.
+.TP
+\fB\-v\fR, \fB\-\-version\fR
+Display version information and exit.
+.TP
+\fB\-e\fR, \fB\-\-eval\fR \fIcode\fR
+Execute the given code string.
+.TP
+\fB\-f\fR, \fB\-\-file\fR \fIfile\fR
+Execute the specified CT file.
+
+.SH USAGE
+
+.SS Interactive Mode
+When called without arguments, ct enters interactive mode:
+.PP
+.RS
+$ ct
+> let x = 10
+> print x
+10
+> exit
+.RE
+
+.SS File Execution
+Execute a CT script file:
+.PP
+.RS
+$ ct script.ct
+.RE
+
+.SS One-liner
+Execute code directly from command line:
+.PP
+.RS
+$ ct -e "print 1+2+3"
+6
+.RE
+
+.SH LANGUAGE SYNTAX
+
+.SS Variables
+.RS
+let x = 10
+let y = 20
+let z = x + y
+.RE
+
+.SS Print
+.RS
+print "Hello World"
+print x + y * 2
+.RE
+
+.SS Arithmetic Operators
+.RS
++   addition
+-   subtraction
+*   multiplication
+/   division
+( ) parentheses for grouping
+.RE
+
+.SS Loops (while)
+.RS
+let i = 1
+while i <= 10 {
+    print i
+    let i = i + 1
+}
+.RE
+
+.SS Conditionals (if)
+.RS
+if x > 10 {
+    print "greater"
+}
+.RE
+
+.SS Built-in Functions
+.RS
+sin(x)   - sine of x
+cos(x)   - cosine of x
+sqrt(x)  - square root of x
+abs(x)   - absolute value of x
+.RE
+
+.SH EXAMPLES
+
+.SS Calculate sum from 1 to 100
+.RS
+$ ct -e "let s=0;let i=1;while i<=100{let s=s+i;let i=i+1};print s"
+5050
+.RE
+
+.SS Fibonacci sequence
+.RS
+$ cat fib.ct
+let a = 0
+let b = 1
+let i = 0
+while i < 20 {
+    print a
+    let fib = a + b
+    let a = b
+    let b = fib
+    let i = i + 1
+}
+$ ct fib.ct
+.RE
+
+.SS Prime numbers within 100
+.RS
+$ cat prime.ct
+let n = 2
+while n <= 100 {
+    let is_prime = 1
+    let i = 2
+    while i * i <= n {
+        if n % i == 0 {
+            let is_prime = 0
+        }
+        let i = i + 1
+    }
+    if is_prime {
+        print n
+    }
+    let n = n + 1
+}
+$ ct prime.ct
+.RE
+
+.SH FILES
+.TP
+.I /usr/local/bin/ct
+The CT interpreter binary.
+.TP
+.I /usr/local/share/ct/lib/
+Standard library files.
+.TP
+.I ~/.ct_history
+Command history in interactive mode.
+
+.SH ENVIRONMENT
+.TP
+.B PATH
+Directory containing the ct executable should be in your PATH.
+
+.SH EXIT STATUS
+.TP
+0
+Successful execution.
+.TP
+1
+Error occurred (syntax error, file not found, etc.).
+
+.SH BUGS
+Report bugs to <your-email@example.com>
+
+.SH AUTHOR
+Written by Your Name
+
+.SH COPYRIGHT
+Copyright (c) 2024 Your Name
+License: MIT
+
+.SH SEE ALSO
+.BR python (1),
+.BR lua (1),
+.BR javascript (1)

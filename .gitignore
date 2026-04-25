@@ -1,0 +1,77 @@
+# Compiled files
+ct
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Build directories
+bin/
+obj/
+build/
+out/
+Debug/
+Release/
+.vscode/
+.idea/
+cmake-build-*/
+
+# Distribution packages
+*.tar.gz
+*.tar.bz2
+*.zip
+*.tgz
+*.deb
+*.rpm
+
+# Editor backup files
+*~
+*.swp
+*.swo
+*.swn
+*.bak
+*.orig
+.*.swp
+.DS_Store
+Thumbs.db
+
+# Test files
+test.log
+test_output.txt
+*.out
+*.err
+valgrind.out
+*.gcov
+*.gcda
+*.gcno
+coverage/
+htmlcov/
+
+# Debug symbols
+*.dSYM/
+*.pdb
+*.idb
+*.ilk
+
+# Local configuration
+config.mk
+config.h
+.local.env
+.env
+
+# Documentation build
+docs/_build/
+docs/html/
+docs/latex/
+*.aux
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/

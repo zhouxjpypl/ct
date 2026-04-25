@@ -1,0 +1,32 @@
+# CT Standard Library
+
+# 平方
+let square = func(x) {
+    return x * x
+}
+
+# 立方
+let cube = func(x) {
+    return x * x * x
+}
+
+# 阶乘
+let factorial = func(n) {
+    let result = 1
+    let i = 1
+    while i <= n {
+        let result = result * i
+        let i = i + 1
+    }
+    return result
+}
+
+# 判断偶数
+let is_even = func(n) {
+    return n % 2 == 0
+}
+
+# 判断奇数
+let is_odd = func(n) {
+    return n % 2 != 0
+}

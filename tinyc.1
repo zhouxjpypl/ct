@@ -1,0 +1,77 @@
+.TH TINYC 1 "2024-01-01" "1.0" "TinyC编程语言"
+
+.SH NAME
+tinyc \- 简单易用的编程语言解释器
+
+.SH SYNOPSIS
+.B tinyc
+[选项] [文件名]
+
+.SH DESCRIPTION
+TinyC 是一个简单易用的编程语言解释器，语法类似 Python，但更简单。
+
+.SH USAGE
+
+交互式模式:
+.B tinyc
+
+运行文件:
+.B tinyc 文件名.tc
+
+.SH EXAMPLES
+
+交互式计算:
+.PP
+>> x = 10
+>> y = 20
+>> print x + y
+30
+
+循环计算:
+.PP
+>> sum = 0
+>> i = 1
+>> while i <= 100 {
+    sum = sum + i
+    i = i + 1
+}
+>> print sum
+5050
+
+.SH SYNTAX
+
+赋值:
+.B 变量 = 表达式
+
+打印:
+.B print 表达式
+.br
+.B print "字符串"
+
+循环:
+.B while 条件 { 语句 }
+
+.SH FILES
+.TP
+.I ~/.tinyc/history
+命令历史文件
+
+.SH ENVIRONMENT
+.TP
+.B PATH
+确保 tinyc 在可执行路径中
+
+.SH AUTHOR
+Written by Your Name
+
+.SH REPORTING BUGS
+Report bugs to <your-email@example.com>
+
+.SH COPYRIGHT
+Copyright \(co 2024 Your Name
+.br
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+.SH SEE ALSO
+.BR c (1), python (1)
